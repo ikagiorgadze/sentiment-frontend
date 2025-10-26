@@ -1,5 +1,6 @@
-const DEFAULT_BASE_URL = 'http://localhost:5678';
-const DEFAULT_CHAT_WEBHOOK_ID = 'ad221486-cf3d-43e0-98b2-390192147713';
+// Use relative path to leverage nginx proxy (avoids CORS issues)
+// nginx proxies /webhook/* to localhost:5678/webhook/*
+const DEFAULT_WEBHOOK_PATH = '/webhook/chat/ad221486-cf3d-43e0-98b2-390192147713';
 
 const sanitize = (value?: string | null) => {
   if (!value) {
@@ -9,19 +10,14 @@ const sanitize = (value?: string | null) => {
   return trimmed.length > 0 ? trimmed : undefined;
 };
 
-const trimTrailingSlash = (value: string) => (value.endsWith('/') ? value.slice(0, -1) : value);
-
 export const getAssistantEndpoint = () => {
+  // Priority 1: Direct URL override (for development or custom deployments)
   const directUrl = sanitize(import.meta.env.VITE_AI_ASSISTANT_URL as string | undefined);
   if (directUrl) {
     return directUrl;
   }
 
-  const legacyBase = sanitize(import.meta.env.VITE_N8N_BASE_URL as string | undefined);
-  const legacyWebhook = sanitize(import.meta.env.VITE_N8N_CHAT_WEBHOOK_ID as string | undefined);
-  if (legacyBase && legacyWebhook) {
-    return `${trimTrailingSlash(legacyBase)}/chat/${legacyWebhook}`;
-  }
-
-  return `${DEFAULT_BASE_URL}/chat/${DEFAULT_CHAT_WEBHOOK_ID}`;
+  // Priority 2: Use default relative path (production)
+  // This goes through nginx proxy, avoiding CORS issues
+  return DEFAULT_WEBHOOK_PATH;
 };
