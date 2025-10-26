@@ -1,3 +1,6 @@
 node_modules
 .env
 dist
+
+# Breadcrumb documentation (internal development docs)
+_*.md

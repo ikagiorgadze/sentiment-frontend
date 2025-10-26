@@ -1,0 +1,84 @@
+name: Deploy Frontend to EC2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        env:
+          # Optional: Include VITE_* environment variables if needed
+          # These are baked into the bundle at build time
+          VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
+          VITE_AI_ASSISTANT_URL: ${{ secrets.VITE_AI_ASSISTANT_URL }}
+        run: npm run build
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          # Non-interactive SSH options for CI/CD
+          echo "Host *" > ~/.ssh/config
+          echo "  StrictHostKeyChecking no" >> ~/.ssh/config
+          echo "  UserKnownHostsFile /dev/null" >> ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
+      - name: Test SSH connection
+        run: |
+          ssh -o ConnectTimeout=10 \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} \
+              "echo 'SSH connection successful'"
+
+      - name: Copy built files to EC2
+        run: |
+          rsync -avz --delete \
+            -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+            dist/ \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/sentiment-frontend-dist/
+
+      - name: Copy deployment files to EC2
+        run: |
+          rsync -avz \
+            -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+            --exclude 'node_modules' \
+            --exclude 'dist' \
+            --exclude '.git' \
+            --exclude '_*.md' \
+            scripts/ nginx.prod.conf \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/sentiment-frontend-deploy/
+
+      - name: Deploy to nginx
+        run: |
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} \
+            "cd /tmp/sentiment-frontend-deploy && \
+             chmod +x *.sh && \
+             ./deploy.sh"
+
+      - name: Health check
+        run: |
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} \
+            "cd /tmp/sentiment-frontend-deploy && \
+             chmod +x health-check.sh && \
+             ./health-check.sh"
