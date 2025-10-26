@@ -1,0 +1,224 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    /* Base Colors - Minimalist Educational Palette */
+    --background: 80 14% 97%;
+    --foreground: 0 0% 11%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 17%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 11%;
+
+    /* Primary - Black for emphasis and interactive elements */
+    --primary: 0 0% 0%;
+    --primary-foreground: 0 0% 100%;
+
+    /* Secondary - Warm beige/pale yellow accent */
+    --secondary: 49 26% 93%;
+    --secondary-foreground: 0 0% 11%;
+
+    /* Muted - Soft neutrals */
+    --muted: 45 24% 91%;
+    --muted-foreground: 0 0% 42%;
+
+    /* Accent - Warm beige highlight */
+    --accent: 49 26% 93%;
+    --accent-foreground: 0 0% 11%;
+
+    /* State Colors - Soft pastels */
+    --destructive: 4 90% 58%;
+    --destructive-foreground: 0 0% 100%;
+    --destructive-bg: 351 100% 96%;
+
+    --success: 122 39% 49%;
+    --success-foreground: 0 0% 100%;
+    --success-bg: 120 42% 93%;
+    
+    --warning: 38 92% 65%;
+    --warning-foreground: 0 0% 11%;
+    --warning-bg: 46 100% 94%;
+    
+    /* Sentiment Colors */
+    --positive: 122 39% 49%;
+    --neutral: 0 0% 62%;
+    --negative: 4 90% 58%;
+
+    /* UI Elements */
+    --border: 0 0% 90%;
+    --input: 0 0% 92%;
+    --ring: 0 0% 0%;
+
+    --radius: 0px;
+
+    /* Sidebar - Clean neutral palette */
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 0 0% 11%;
+    --sidebar-primary: 0 0% 0%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 49 26% 93%;
+    --sidebar-accent-foreground: 0 0% 11%;
+    --sidebar-border: 0 0% 90%;
+    --sidebar-ring: 0 0% 0%;
+
+    /* Chart Colors - Data visualization palette */
+    --chart-1: 0 0% 0%;
+    --chart-2: 122 39% 49%;
+    --chart-3: 38 92% 65%;
+    --chart-4: 4 90% 58%;
+    --chart-5: 0 0% 62%;
+
+    /* Shadows - Subtle and minimal */
+    --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.05), 0 1px 2px -1px rgb(0 0 0 / 0.05);
+    --shadow-elevated: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+    --shadow-button: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    
+    /* Transitions */
+    --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    --transition-fast: all 0.15s ease-out;
+  }
+
+  .dark {
+    --background: 0 0% 11%;
+    --foreground: 0 0% 98%;
+
+    --card: 0 0% 13%;
+    --card-foreground: 0 0% 98%;
+
+    --popover: 0 0% 13%;
+    --popover-foreground: 0 0% 98%;
+
+    --primary: 0 0% 100%;
+    --primary-foreground: 0 0% 0%;
+
+    --secondary: 0 0% 17%;
+    --secondary-foreground: 0 0% 98%;
+
+    --muted: 0 0% 17%;
+    --muted-foreground: 0 0% 62%;
+
+    --accent: 0 0% 17%;
+    --accent-foreground: 0 0% 98%;
+
+    --destructive: 4 90% 58%;
+    --destructive-foreground: 0 0% 100%;
+    --destructive-bg: 4 60% 20%;
+
+    --success: 122 39% 49%;
+    --success-foreground: 0 0% 100%;
+    --success-bg: 122 30% 20%;
+    
+    --warning: 38 92% 65%;
+    --warning-foreground: 0 0% 0%;
+    --warning-bg: 38 60% 20%;
+
+    --positive: 122 39% 49%;
+    --neutral: 0 0% 62%;
+    --negative: 4 90% 58%;
+
+    --border: 0 0% 20%;
+    --input: 0 0% 17%;
+    --ring: 0 0% 100%;
+
+    --sidebar-background: 0 0% 13%;
+    --sidebar-foreground: 0 0% 98%;
+    --sidebar-primary: 0 0% 100%;
+    --sidebar-primary-foreground: 0 0% 0%;
+    --sidebar-accent: 0 0% 17%;
+    --sidebar-accent-foreground: 0 0% 98%;
+    --sidebar-border: 0 0% 20%;
+    --sidebar-ring: 0 0% 100%;
+
+    --chart-1: 0 0% 100%;
+    --chart-2: 122 39% 49%;
+    --chart-3: 38 92% 65%;
+    --chart-4: 4 90% 58%;
+    --chart-5: 0 0% 62%;
+
+    --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.3);
+    --shadow-elevated: 0 4px 6px -1px rgb(0 0 0 / 0.3);
+    --shadow-button: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    font-optical-sizing: auto;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    letter-spacing: -0.01em;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-semibold;
+    letter-spacing: -0.02em;
+  }
+}
+
+@layer utilities {
+  /* Card Styles */
+  .card-minimal {
+    @apply border border-border bg-card shadow-card;
+  }
+
+  .card-elevated {
+    @apply border border-border bg-card shadow-elevated;
+  }
+
+  /* Text Utilities */
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* Custom Scrollbar Styles */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 4px;
+  transition: background-color 0.2s ease;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Hover effect for scrollable containers */
+.scroll-container:hover *::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.scroll-container:hover *::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
