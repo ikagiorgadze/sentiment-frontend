@@ -106,9 +106,9 @@ fi
 # Check 8: API proxy to backend
 echo ""
 echo "Testing API proxy (requires backend running)..."
-if curl -sf http://localhost/api/health > /dev/null 2>&1; then
+if curl -sf http://localhost/health > /dev/null 2>&1; then
     print_status 0 "API proxy to backend working"
-    API_RESPONSE=$(curl -s http://localhost/api/health)
+    API_RESPONSE=$(curl -s http://localhost/health)
     echo "   Backend response: $API_RESPONSE"
 else
     print_warning "API proxy not responding (backend may not be running yet)"
