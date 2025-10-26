@@ -1,5 +1,5 @@
 const DEFAULT_BASE_URL = 'http://localhost:5678';
-const DEFAULT_CHAT_WEBHOOK_ID = '357893d0-7b87-47b9-bd94-3dee78a79659';
+const DEFAULT_CHAT_WEBHOOK_ID = 'ad221486-cf3d-43e0-98b2-390192147713';
 
 const sanitize = (value?: string | null) => {
   if (!value) {
