@@ -139,6 +139,7 @@ export interface UserQueryOptions extends QueryOptions {
   includeComments?: boolean;
   includeReactions?: boolean;
   includeStats?: boolean;
+  onlyWithComments?: boolean;
 }
 
 export interface SentimentQueryOptions extends QueryOptions {

@@ -1,16 +1,14 @@
 import { useState } from 'react';
-import { useScrapingJobs, useScrapingMutation } from '@/hooks/useApi';
+import { useScrapingMutation } from '@/hooks/useApi';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
-import { Loader2, CheckCircle2, XCircle, Clock, Plus, Trash2 } from 'lucide-react';
-import { formatDistanceToNow } from 'date-fns';
+import { Loader2, Clock, Plus, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 export default function Scraping() {
-  const { data: jobs } = useScrapingJobs(3000);
   const scrapingMutation = useScrapingMutation();
   
   const [scrapeType, setScrapeType] = useState<'page' | 'post'>('page');
@@ -65,48 +63,6 @@ export default function Scraping() {
       setIsSubmitting(false);
     }
   };
-
-  const getStatusIcon = (status: string) => {
-    switch (status) {
-      case 'completed':
-        return <CheckCircle2 className="h-5 w-5 text-green-600" />;
-      case 'failed':
-        return <XCircle className="h-5 w-5 text-red-600" />;
-      case 'running':
-        return <Loader2 className="h-5 w-5 text-black animate-spin" />;
-      default:
-        return <Clock className="h-5 w-5 text-slate-600" />;
-    }
-  };
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'completed':
-        return 'border-l-green-600';
-      case 'failed':
-        return 'border-l-red-600';
-      case 'running':
-        return 'border-l-black';
-      default:
-        return 'border-l-slate-600';
-    }
-  };
-
-  const getProgressColor = (status: string) => {
-    switch (status) {
-      case 'completed':
-        return 'bg-green-600';
-      case 'failed':
-        return 'bg-red-600';
-      case 'running':
-        return 'bg-black';
-      default:
-        return 'bg-slate-600';
-    }
-  };
-
-  const realJobs = jobs || [];
-  const hasJobs = realJobs.length > 0;
 
   return (
     <div className="min-h-screen bg-white">
@@ -295,69 +251,20 @@ export default function Scraping() {
           </div>
         </div>
 
-        {/* Jobs List - Compact */}
-        <h2 className="text-2xl font-bold text-black tracking-tight mb-6 px-8">Recent Jobs</h2>
-        
-        {hasJobs ? (
-          <div className="border-2 border-slate-900">
-            {realJobs.map((job, index) => (
-              <div 
-                key={job.id} 
-                className={`bg-white p-6 border-l-4 ${getStatusColor(job.status)} ${index < realJobs.length - 1 ? 'border-b-2 border-slate-200' : ''}`}
-              >
-                <div className="flex items-center justify-between gap-6">
-                  {/* Left: Status + Info */}
-                  <div className="flex items-center gap-3 min-w-0 flex-1">
-                    {getStatusIcon(job.status)}
-                    <div className="min-w-0">
-                      <h3 className="text-base font-bold text-black tracking-tight">
-                        Job {job.id}
-                      </h3>
-                      <p className="text-sm text-slate-600">
-                        {formatDistanceToNow(new Date(job.startedAt), { addSuffix: true })}
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Center: Progress */}
-                  <div className="flex-1 max-w-xs">
-                    <div className="flex items-center justify-between text-xs mb-2">
-                      <span className="text-slate-600 font-semibold">{job.progress}%</span>
-                      <span className="text-slate-500">{job.processedItems}/{job.totalItems}</span>
-                    </div>
-                    <div className="h-2 w-full bg-slate-100">
-                      <div 
-                        className={`h-2 transition-all ${getProgressColor(job.status)}`}
-                        style={{ width: `${job.progress}%` }}
-                      />
-                    </div>
-                  </div>
-
-                  {/* Right: Completion */}
-                  {job.completedAt && (
-                    <div className="text-sm text-slate-600 whitespace-nowrap">
-                      {formatDistanceToNow(new Date(job.completedAt), { addSuffix: true })}
-                    </div>
-                  )}
-
-                  {/* Error - Full width if exists */}
-                  {job.error && (
-                    <div className="flex-1">
-                      <p className="text-sm font-semibold text-red-600">{job.error}</p>
-                    </div>
-                  )}
-                </div>
+        {/* Jobs temporarily disabled */}
+        <div className="px-8">
+          <div className="bg-slate-50 border-2 border-slate-200 p-6 text-slate-700">
+            <div className="flex items-center gap-3">
+              <Clock className="h-6 w-6 text-slate-500" />
+              <div>
+                <h3 className="text-lg font-semibold text-black">Job tracking unavailable</h3>
+                <p className="text-sm">
+                  We&apos;re processing new scraping jobs but real-time status updates are temporarily disabled. You&apos;ll receive results when they&apos;re ready.
+                </p>
               </div>
-            ))}
+            </div>
           </div>
-        ) : (
-          <div className="bg-white border-2 border-slate-200 p-12 text-center">
-            <Clock className="h-12 w-12 text-slate-300 mx-auto mb-4" />
-            <p className="text-base text-slate-600">
-              No jobs yet. Start a new scraping job above.
-            </p>
-          </div>
-        )}
+        </div>
       </div>
     </div>
   );

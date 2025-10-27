@@ -17,6 +17,7 @@ export default function Users() {
       includeStats: true,
       orderBy: 'inserted_at',
       orderDirection: 'DESC',
+      onlyWithComments: true,
     };
 
     if (query.trim().length > 0) {
