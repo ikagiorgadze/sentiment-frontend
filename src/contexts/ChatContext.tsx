@@ -310,14 +310,55 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (isSendingRef.current) return;
-    const pendingMeta = pendingMetaRef.current;
-    if (!pendingMeta) return;
 
-    const hasPendingMessage = messagesRef.current.some(
-      (msg) => msg.id === pendingMeta.id && msg.role === 'assistant' && msg.status === 'pending',
-    );
+    const pendingAssistant = [...messagesRef.current]
+      .reverse()
+      .find((msg) => msg.role === 'assistant' && msg.status === 'pending');
 
-    if (!hasPendingMessage) {
+    let pendingMeta = pendingMetaRef.current;
+
+    if ((!pendingMeta || pendingMeta.id !== pendingAssistant?.id) && pendingAssistant) {
+      const pendingIndex = messagesRef.current.findIndex((msg) => msg.id === pendingAssistant.id);
+
+      if (pendingIndex >= 0) {
+        const historyCandidates = messagesRef.current.slice(0, pendingIndex);
+        let lastUserMessage: ChatMessage | undefined;
+
+        for (let i = historyCandidates.length - 1; i >= 0; i -= 1) {
+          if (historyCandidates[i].role === 'user') {
+            lastUserMessage = historyCandidates[i];
+            break;
+          }
+        }
+
+        if (lastUserMessage && lastUserMessage.content.trim()) {
+          const historyWindow = buildHistoryWindow(
+            historyCandidates.filter((msg) => msg.id !== lastUserMessage.id),
+            lastUserMessage,
+          );
+
+          pendingMeta = {
+            id: pendingAssistant.id,
+            prompt: lastUserMessage.content,
+            history: historyWindow,
+            createdAt: Date.now(),
+          };
+
+          pendingMetaRef.current = pendingMeta;
+          persistPendingMeta(pendingMeta);
+        }
+      }
+    }
+
+    if (!pendingMeta) {
+      if (!pendingAssistant && pendingMetaRef.current) {
+        pendingMetaRef.current = null;
+        persistPendingMeta(null);
+      }
+      return;
+    }
+
+    if (!pendingAssistant || pendingAssistant.id !== pendingMeta.id) {
       pendingMetaRef.current = null;
       persistPendingMeta(null);
       return;
