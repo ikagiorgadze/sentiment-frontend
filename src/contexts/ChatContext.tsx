@@ -40,6 +40,8 @@ interface PendingRequestMeta {
   prompt: string;
   history: MessageHistoryItem[];
   createdAt: number;
+  userMessageId?: string;
+  reconstructed?: boolean;
 }
 
 const MAX_HISTORY = 40;
@@ -92,11 +94,18 @@ const sanitizePendingMeta = (value: unknown): PendingRequestMeta | null => {
   if (!Array.isArray(candidate.history) || !candidate.history.every(isHistoryItem)) {
     return null;
   }
+  const userMessageId =
+    typeof (candidate as PendingRequestMeta).userMessageId === 'string' &&
+    (candidate as PendingRequestMeta).userMessageId.trim().length > 0
+      ? (candidate as PendingRequestMeta).userMessageId
+      : undefined;
+
   return {
     id: candidate.id,
     prompt: candidate.prompt,
     history: candidate.history.map(({ role, content }) => ({ role, content })),
     createdAt: candidate.createdAt,
+    ...(userMessageId ? { userMessageId } : {}),
   };
 };
 
@@ -152,7 +161,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       if (typeof window === 'undefined') return;
       const pendingKey = getPendingStorageKey(storageKey);
       if (meta) {
-        window.localStorage.setItem(pendingKey, JSON.stringify(meta));
+        const { reconstructed, ...persistable } = meta;
+        window.localStorage.setItem(pendingKey, JSON.stringify(persistable));
       } else {
         window.localStorage.removeItem(pendingKey);
       }
@@ -186,18 +196,19 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       const hasPendingMessage = nextMessages.some(
         (msg) => msg.id === parsed.id && msg.role === 'assistant' && msg.status === 'pending',
       );
+      const enhancedMeta: PendingRequestMeta = hasPendingMessage
+        ? parsed
+        : { ...parsed, reconstructed: true };
+      pendingMetaRef.current = enhancedMeta;
       if (!hasPendingMessage) {
-        window.localStorage.removeItem(pendingKey);
-        pendingMetaRef.current = null;
-        return;
+        persistPendingMeta(enhancedMeta);
       }
-      pendingMetaRef.current = parsed;
     } catch (metaError) {
       console.warn('Unable to restore pending assistant request', metaError);
       window.localStorage.removeItem(pendingKey);
       pendingMetaRef.current = null;
     }
-  }, [storageKey]);
+  }, [persistPendingMeta, storageKey]);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -311,46 +322,129 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (isSendingRef.current) return;
 
-    const pendingAssistant = [...messagesRef.current]
+    let pendingMeta = pendingMetaRef.current;
+    let pendingAssistant = [...messagesRef.current]
       .reverse()
       .find((msg) => msg.role === 'assistant' && msg.status === 'pending');
 
-    let pendingMeta = pendingMetaRef.current;
+    if (pendingMeta && !pendingAssistant) {
+      const userMessageId =
+        pendingMeta.userMessageId && pendingMeta.userMessageId.trim().length > 0
+          ? pendingMeta.userMessageId
+          : makeId();
 
-    if ((!pendingMeta || pendingMeta.id !== pendingAssistant?.id) && pendingAssistant) {
-      const pendingIndex = messagesRef.current.findIndex((msg) => msg.id === pendingAssistant.id);
+      const existingUser = messagesRef.current.find((msg) => msg.id === userMessageId && msg.role === 'user');
+      const userCreatedAt =
+        existingUser?.createdAt ?? Math.max(0, pendingMeta.createdAt - 1);
 
-      if (pendingIndex >= 0) {
-        const historyCandidates = messagesRef.current.slice(0, pendingIndex);
-        let lastUserMessage: ChatMessage | undefined;
-
-        for (let i = historyCandidates.length - 1; i >= 0; i -= 1) {
-          if (historyCandidates[i].role === 'user') {
-            lastUserMessage = historyCandidates[i];
-            break;
-          }
-        }
-
-        if (lastUserMessage && lastUserMessage.content.trim()) {
-          const historyWindow = buildHistoryWindow(
-            historyCandidates.filter((msg) => msg.id !== lastUserMessage.id),
-            lastUserMessage,
-          );
-
-          pendingMeta = {
-            id: pendingAssistant.id,
-            prompt: lastUserMessage.content,
-            history: historyWindow,
-            createdAt: Date.now(),
+      const restoredUser: ChatMessage = existingUser
+        ? { ...existingUser, content: pendingMeta.prompt }
+        : {
+            id: userMessageId,
+            role: 'user',
+            content: pendingMeta.prompt,
+            status: 'ready',
+            createdAt: userCreatedAt,
           };
 
-          pendingMetaRef.current = pendingMeta;
-          persistPendingMeta(pendingMeta);
+      const assistantCreatedAt = Math.max(pendingMeta.createdAt, restoredUser.createdAt + 1, Date.now());
+      const restoredAssistant: ChatMessage = {
+        id: pendingMeta.id,
+        role: 'assistant',
+        content: 'Analyzing your question...',
+        status: 'pending',
+        createdAt: assistantCreatedAt,
+      };
+
+      setMessages((prev) => {
+        if (prev.some((msg) => msg.id === restoredAssistant.id)) {
+          return prev;
         }
-      }
+
+        let next = prev.map((msg) => (msg.id === restoredUser.id ? restoredUser : msg));
+        if (!next.some((msg) => msg.id === restoredUser.id)) {
+          next = [...next, restoredUser];
+        }
+        next = [...next, restoredAssistant];
+        return next.slice(-MAX_HISTORY);
+      });
+
+      const withoutRestored = messagesRef.current.filter(
+        (msg) => msg.id !== restoredUser.id && msg.id !== restoredAssistant.id,
+      );
+      messagesRef.current = [...withoutRestored, restoredUser, restoredAssistant].slice(-MAX_HISTORY);
+
+      const reconstructedMeta: PendingRequestMeta = {
+        ...pendingMeta,
+        userMessageId,
+        createdAt: assistantCreatedAt,
+        reconstructed: true,
+      };
+      pendingMetaRef.current = reconstructedMeta;
+      persistPendingMeta(reconstructedMeta);
+      return;
     }
 
-    if (!pendingMeta) {
+    if (pendingAssistant) {
+      const needsMeta = !pendingMeta || pendingMeta.id !== pendingAssistant.id;
+
+      if (needsMeta) {
+        const pendingIndex = messagesRef.current.findIndex((msg) => msg.id === pendingAssistant.id);
+
+        if (pendingIndex >= 0) {
+          const historyCandidates = messagesRef.current.slice(0, pendingIndex);
+          let lastUserMessage: ChatMessage | undefined;
+
+          for (let i = historyCandidates.length - 1; i >= 0; i -= 1) {
+            if (historyCandidates[i].role === 'user') {
+              lastUserMessage = historyCandidates[i];
+              break;
+            }
+          }
+
+          if (!lastUserMessage) {
+            lastUserMessage = [...messagesRef.current]
+              .slice(0, pendingIndex)
+              .reverse()
+              .find((msg) => msg.role === 'user');
+          }
+
+          if (lastUserMessage && lastUserMessage.content.trim()) {
+            const historyWindow = buildHistoryWindow(
+              historyCandidates.filter((msg) => msg.id !== lastUserMessage.id),
+              lastUserMessage,
+            );
+
+            const reconstructedMeta: PendingRequestMeta = {
+              id: pendingAssistant.id,
+              prompt: lastUserMessage.content,
+              history: historyWindow,
+              createdAt: Date.now() - 1000,
+              userMessageId: lastUserMessage.id,
+              reconstructed: true,
+            };
+
+            pendingMeta = reconstructedMeta;
+            pendingMetaRef.current = reconstructedMeta;
+            persistPendingMeta(reconstructedMeta);
+          } else {
+            pendingMeta = null;
+            pendingMetaRef.current = null;
+            persistPendingMeta(null);
+          }
+        } else {
+          pendingMeta = null;
+          pendingMetaRef.current = null;
+          persistPendingMeta(null);
+        }
+      }
+
+      pendingAssistant = [...messagesRef.current]
+        .reverse()
+        .find((msg) => msg.role === 'assistant' && msg.status === 'pending');
+    }
+
+    if (!pendingMeta || !pendingAssistant) {
       if (!pendingAssistant && pendingMetaRef.current) {
         pendingMetaRef.current = null;
         persistPendingMeta(null);
@@ -358,19 +452,20 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    if (!pendingAssistant || pendingAssistant.id !== pendingMeta.id) {
+    if (pendingAssistant.id !== pendingMeta.id) {
       pendingMetaRef.current = null;
       persistPendingMeta(null);
       return;
     }
 
-    // Avoid rapid replays; give the original request a moment before retrying.
-    if (Date.now() - pendingMeta.createdAt < 500) {
+    const shouldDelay = !pendingMeta.reconstructed && Date.now() - pendingMeta.createdAt < 500;
+    if (shouldDelay) {
       return;
     }
 
     const refreshedMeta: PendingRequestMeta = {
       ...pendingMeta,
+      reconstructed: false,
       createdAt: Date.now(),
     };
     pendingMetaRef.current = refreshedMeta;
@@ -415,6 +510,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         prompt: trimmed,
         history: historyWindow,
         createdAt: Date.now(),
+        userMessageId: userMessage.id,
       };
 
       messagesRef.current = [...messagesRef.current, userMessage, assistantPlaceholder].slice(-MAX_HISTORY);
