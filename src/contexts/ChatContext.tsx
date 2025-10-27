@@ -30,7 +30,20 @@ interface ChatContextValue {
   clearError: () => void;
 }
 
+interface MessageHistoryItem {
+  role: MessageRole;
+  content: string;
+}
+
+interface PendingRequestMeta {
+  id: string;
+  prompt: string;
+  history: MessageHistoryItem[];
+  createdAt: number;
+}
+
 const MAX_HISTORY = 40;
+const PENDING_META_SUFFIX = '::pending-meta';
 
 const makeId = () => {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -62,6 +75,31 @@ const isChatMessage = (value: unknown): value is ChatMessage => {
   );
 };
 
+const isHistoryItem = (value: unknown): value is MessageHistoryItem => {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as MessageHistoryItem;
+  return (
+    (candidate.role === 'assistant' || candidate.role === 'user') && typeof candidate.content === 'string'
+  );
+};
+
+const sanitizePendingMeta = (value: unknown): PendingRequestMeta | null => {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as PendingRequestMeta;
+  if (typeof candidate.id !== 'string' || typeof candidate.prompt !== 'string' || typeof candidate.createdAt !== 'number') {
+    return null;
+  }
+  if (!Array.isArray(candidate.history) || !candidate.history.every(isHistoryItem)) {
+    return null;
+  }
+  return {
+    id: candidate.id,
+    prompt: candidate.prompt,
+    history: candidate.history.map(({ role, content }) => ({ role, content })),
+    createdAt: candidate.createdAt,
+  };
+};
+
 const loadMessages = (key: string): ChatMessage[] => {
   if (typeof window === 'undefined') {
     return getFallbackMessages();
@@ -86,6 +124,16 @@ const loadMessages = (key: string): ChatMessage[] => {
 
 const ChatContext = createContext<ChatContextValue | undefined>(undefined);
 
+const buildHistoryWindow = (messages: ChatMessage[], upcoming?: ChatMessage): MessageHistoryItem[] => {
+  const pool = upcoming ? [...messages, upcoming] : [...messages];
+  return pool
+    .filter((msg) => msg.role !== 'assistant' || msg.status === 'ready')
+    .slice(-6)
+    .map(({ role, content }) => ({ role, content }));
+};
+
+const getPendingStorageKey = (key: string) => `${key}${PENDING_META_SUFFIX}`;
+
 export function ChatProvider({ children }: { children: ReactNode }) {
   const assistantEndpoint = useMemo(() => getAssistantEndpoint(), []);
   const { user } = useAuth();
@@ -96,12 +144,59 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
   const messagesRef = useRef<ChatMessage[]>(messages);
+  const pendingMetaRef = useRef<PendingRequestMeta | null>(null);
   const isSendingRef = useRef(false);
+
+  const persistPendingMeta = useCallback(
+    (meta: PendingRequestMeta | null) => {
+      if (typeof window === 'undefined') return;
+      const pendingKey = getPendingStorageKey(storageKey);
+      if (meta) {
+        window.localStorage.setItem(pendingKey, JSON.stringify(meta));
+      } else {
+        window.localStorage.removeItem(pendingKey);
+      }
+    },
+    [storageKey],
+  );
 
   useEffect(() => {
     const nextMessages = loadMessages(storageKey);
     setMessages(nextMessages);
     setError(null);
+
+    if (typeof window === 'undefined') {
+      pendingMetaRef.current = null;
+      return;
+    }
+
+    const pendingKey = getPendingStorageKey(storageKey);
+    const rawMeta = window.localStorage.getItem(pendingKey);
+    if (!rawMeta) {
+      pendingMetaRef.current = null;
+      return;
+    }
+    try {
+      const parsed = sanitizePendingMeta(JSON.parse(rawMeta));
+      if (!parsed) {
+        window.localStorage.removeItem(pendingKey);
+        pendingMetaRef.current = null;
+        return;
+      }
+      const hasPendingMessage = nextMessages.some(
+        (msg) => msg.id === parsed.id && msg.role === 'assistant' && msg.status === 'pending',
+      );
+      if (!hasPendingMessage) {
+        window.localStorage.removeItem(pendingKey);
+        pendingMetaRef.current = null;
+        return;
+      }
+      pendingMetaRef.current = parsed;
+    } catch (metaError) {
+      console.warn('Unable to restore pending assistant request', metaError);
+      window.localStorage.removeItem(pendingKey);
+      pendingMetaRef.current = null;
+    }
   }, [storageKey]);
 
   useEffect(() => {
@@ -119,6 +214,128 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const clearError = useCallback(() => setError(null), []);
+
+  const updateAssistantMessage = useCallback((meta: PendingRequestMeta, updater: (prev: ChatMessage) => ChatMessage) => {
+    setMessages((prev) => {
+      const now = Date.now();
+      let updated = false;
+      const next = prev.map((msg) => {
+        if (msg.id === meta.id) {
+          updated = true;
+          return updater({ ...msg, createdAt: now });
+        }
+        return msg;
+      });
+
+      if (updated) {
+        return next;
+      }
+
+      // If the placeholder vanished (e.g., due to reload), append a new assistant message.
+      const synthesized = updater({
+        id: meta.id,
+        role: 'assistant',
+        content: '',
+        status: 'pending',
+        createdAt: now,
+      });
+      return [...prev, synthesized].slice(-MAX_HISTORY);
+    });
+  }, []);
+
+  const triggerAssistantRequest = useCallback(
+    async (meta: PendingRequestMeta) => {
+      if (isSendingRef.current) {
+        return;
+      }
+
+      pendingMetaRef.current = meta;
+      persistPendingMeta(meta);
+      setIsSending(true);
+      isSendingRef.current = true;
+
+      const controller = new AbortController();
+      controllerRef.current = controller;
+
+      try {
+        const response = await fetch(assistantEndpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            chatInput: meta.prompt,
+            history: meta.history,
+            auth_user_id: user?.id,
+          }),
+          signal: controller.signal,
+          keepalive: true,
+        });
+
+        const rawText = await response.text();
+        if (!response.ok) {
+          throw new Error(rawText || 'Assistant is unavailable right now. Please try again.');
+        }
+
+        const formatted = rawText.trim() || 'No analysis was returned for that prompt.';
+        updateAssistantMessage(meta, (previous) => ({
+          ...previous,
+          content: formatted,
+          status: 'ready',
+        }));
+      } catch (err) {
+        const fallback =
+          err instanceof DOMException && err.name === 'AbortError'
+            ? 'Assistant request was interrupted. Please try again.'
+            : err instanceof Error
+              ? err.message
+              : 'Unable to fetch the analysis. Please try again later.';
+
+        updateAssistantMessage(meta, (previous) => ({
+          ...previous,
+          content: fallback,
+          status: 'error',
+        }));
+        setError(fallback);
+      } finally {
+        setIsSending(false);
+        isSendingRef.current = false;
+        controllerRef.current = null;
+        pendingMetaRef.current = null;
+        persistPendingMeta(null);
+      }
+    },
+    [assistantEndpoint, persistPendingMeta, updateAssistantMessage, user?.id],
+  );
+
+  useEffect(() => {
+    if (isSendingRef.current) return;
+    const pendingMeta = pendingMetaRef.current;
+    if (!pendingMeta) return;
+
+    const hasPendingMessage = messagesRef.current.some(
+      (msg) => msg.id === pendingMeta.id && msg.role === 'assistant' && msg.status === 'pending',
+    );
+
+    if (!hasPendingMessage) {
+      pendingMetaRef.current = null;
+      persistPendingMeta(null);
+      return;
+    }
+
+    // Avoid rapid replays; give the original request a moment before retrying.
+    if (Date.now() - pendingMeta.createdAt < 500) {
+      return;
+    }
+
+    const refreshedMeta: PendingRequestMeta = {
+      ...pendingMeta,
+      createdAt: Date.now(),
+    };
+    pendingMetaRef.current = refreshedMeta;
+    persistPendingMeta(refreshedMeta);
+    void triggerAssistantRequest(refreshedMeta);
+  }, [messages, persistPendingMeta, triggerAssistantRequest]);
 
   const sendMessage = useCallback(
     async (prompt: string) => {
@@ -145,77 +362,24 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         createdAt: Date.now(),
       };
 
-      const placeholderId = assistantPlaceholder.id;
-
-      const historyWindow = [...messagesRef.current, userMessage]
-        .filter((msg) => msg.role !== 'assistant' || msg.status === 'ready')
-        .slice(-6)
-        .map(({ role, content }) => ({ role, content }));
-
       setMessages((prev) => {
         const next = [...prev, userMessage, assistantPlaceholder];
         return next.slice(-MAX_HISTORY);
       });
 
-      setIsSending(true);
-      isSendingRef.current = true;
+      const historyWindow = buildHistoryWindow(messagesRef.current, userMessage);
 
-      const controller = new AbortController();
-      controllerRef.current = controller;
+      const pendingMeta: PendingRequestMeta = {
+        id: assistantPlaceholder.id,
+        prompt: trimmed,
+        history: historyWindow,
+        createdAt: Date.now(),
+      };
 
-      try {
-        const response = await fetch(assistantEndpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            chatInput: trimmed,
-            history: historyWindow,
-            auth_user_id: user?.id,
-          }),
-          signal: controller.signal,
-        });
-
-        const rawText = await response.text();
-        if (!response.ok) {
-          throw new Error(rawText || 'Assistant is unavailable right now. Please try again.');
-        }
-
-        const formatted = rawText.trim() || 'No analysis was returned for that prompt.';
-
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === placeholderId
-              ? { ...msg, content: formatted, status: 'ready', createdAt: Date.now() }
-              : msg,
-          ),
-        );
-      } catch (err) {
-        const fallback =
-          err instanceof Error
-            ? err.message
-            : 'Unable to fetch the analysis. Please try again later.';
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === placeholderId
-              ? {
-                  ...msg,
-                  content: fallback,
-                  status: 'error',
-                  createdAt: Date.now(),
-                }
-              : msg,
-          ),
-        );
-        setError(fallback);
-      } finally {
-        setIsSending(false);
-        isSendingRef.current = false;
-        controllerRef.current = null;
-      }
+      messagesRef.current = [...messagesRef.current, userMessage, assistantPlaceholder].slice(-MAX_HISTORY);
+      await triggerAssistantRequest(pendingMeta);
     },
-    [assistantEndpoint, user?.id],
+    [triggerAssistantRequest],
   );
 
   const value = useMemo(
