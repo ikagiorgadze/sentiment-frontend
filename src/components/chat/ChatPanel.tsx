@@ -1,82 +1,16 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
-import { getAssistantEndpoint } from '@/lib/assistantConfig';
 import { Loader2, Sparkles, User } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { useAuth } from '@/contexts/AuthContext';
-
-type MessageRole = 'assistant' | 'user';
-type MessageStatus = 'ready' | 'pending' | 'error';
-
-interface ChatMessage {
-  id: string;
-  role: MessageRole;
-  content: string;
-  status: MessageStatus;
-  createdAt: number;
-}
+import { useChat } from '@/contexts/ChatContext';
 
 interface ChatPanelProps {
   className?: string;
   variant?: 'page' | 'dialog';
 }
-
-const MAX_HISTORY = 40;
-
-const makeId = () => {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-    return crypto.randomUUID();
-  }
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-};
-
-const createWelcomeMessage = (): ChatMessage => ({
-  id: makeId(),
-  role: 'assistant',
-  content:
-    "Hi! I'm your political intelligence co-pilot. Ask about elections, coalitions, democratization, or policy shifts and I'll summarize recent reporting, academic perspectives, and relevant history.",
-  status: 'ready',
-  createdAt: Date.now(),
-});
-
-const getFallbackMessages = () => [createWelcomeMessage()];
-
-const isChatMessage = (value: unknown): value is ChatMessage => {
-  if (!value || typeof value !== 'object') return false;
-  const candidate = value as ChatMessage;
-  return (
-    typeof candidate.id === 'string' &&
-    (candidate.role === 'assistant' || candidate.role === 'user') &&
-    typeof candidate.content === 'string' &&
-    (candidate.status === 'ready' || candidate.status === 'pending' || candidate.status === 'error') &&
-    typeof candidate.createdAt === 'number'
-  );
-};
-
-const loadMessages = (key: string): ChatMessage[] => {
-  if (typeof window === 'undefined') {
-    return getFallbackMessages();
-  }
-  try {
-    const raw = window.localStorage.getItem(key);
-    if (!raw) {
-      return getFallbackMessages();
-    }
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      const sanitized = parsed.filter(isChatMessage);
-      if (sanitized.length) {
-        return sanitized;
-      }
-    }
-  } catch (error) {
-    console.warn('Unable to restore chat history', error);
-  }
-  return getFallbackMessages();
-};
 
 const MarkdownMessage = ({ content }: { content: string }) => (
   <div className="prose prose-sm max-w-none text-slate-900 prose-headings:font-semibold prose-headings:text-slate-900 prose-p:text-slate-700 prose-li:text-slate-700 prose-a:text-primary">
@@ -88,7 +22,7 @@ const MarkdownMessage = ({ content }: { content: string }) => (
             {...props}
             target="_blank"
             rel="noreferrer"
-            className="text-primary underline underline-offset-2 break-words"
+            className="break-words text-primary underline underline-offset-2"
           />
         ),
         p: ({ node, ...props }) => <p {...props} className="text-sm leading-relaxed text-slate-700" />,
@@ -110,29 +44,9 @@ const MarkdownMessage = ({ content }: { content: string }) => (
 );
 
 export function ChatPanel({ className, variant = 'page' }: ChatPanelProps) {
-  const assistantEndpoint = useMemo(() => getAssistantEndpoint(), []);
-  const { user } = useAuth();
-  const userIdentifier = user?.id || user?.email || 'guest';
-  const storageKey = useMemo(() => `ai-assistant-history-${userIdentifier}`, [userIdentifier]);
+  const { messages, isSending, error, sendMessage, clearError } = useChat();
   const [input, setInput] = useState('');
-  const [messages, setMessages] = useState<ChatMessage[]>(() => loadMessages(storageKey));
-  const [isSending, setIsSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const controllerRef = useRef<AbortController | null>(null);
-
-  useEffect(() => {
-    setMessages(loadMessages(storageKey));
-  }, [storageKey]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    try {
-      window.localStorage.setItem(storageKey, JSON.stringify(messages));
-    } catch (storageError) {
-      console.warn('Unable to persist chat history', storageError);
-    }
-  }, [messages, storageKey]);
 
   useEffect(() => {
     const container = scrollRef.current;
@@ -140,109 +54,19 @@ export function ChatPanel({ className, variant = 'page' }: ChatPanelProps) {
     container.scrollTop = container.scrollHeight;
   }, [messages]);
 
-  useEffect(() => () => controllerRef.current?.abort(), []);
-
-  const sendMessage = async (prompt: string) => {
-    const trimmed = prompt.trim();
-    if (!trimmed) {
-      return;
-    }
-
-    setInput('');
-    setError(null);
-
-    const userMessage: ChatMessage = {
-      id: makeId(),
-      role: 'user',
-      content: trimmed,
-      status: 'ready',
-      createdAt: Date.now(),
-    };
-
-    const assistantPlaceholder: ChatMessage = {
-      id: makeId(),
-      role: 'assistant',
-      content: 'Analyzing your question...',
-      status: 'pending',
-      createdAt: Date.now(),
-    };
-
-    const placeholderId = assistantPlaceholder.id;
-
-    const historyWindow = [...messages, userMessage]
-      .filter((msg) => msg.role !== 'assistant' || msg.status === 'ready')
-      .slice(-6)
-      .map(({ role, content }) => ({ role, content }));
-
-    setMessages((prev) => {
-      const next = [...prev, userMessage, assistantPlaceholder];
-      return next.slice(-MAX_HISTORY);
-    });
-
-    setIsSending(true);
-
-    const controller = new AbortController();
-    controllerRef.current = controller;
-
-    try {
-      const response = await fetch(assistantEndpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          chatInput: trimmed,
-          history: historyWindow,
-          auth_user_id: user?.id,
-        }),
-        signal: controller.signal,
-      });
-
-      const rawText = await response.text();
-      if (!response.ok) {
-        throw new Error(rawText || 'Assistant is unavailable right now. Please try again.');
-      }
-
-      const formatted = rawText.trim() || 'No analysis was returned for that prompt.';
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === placeholderId
-            ? { ...msg, content: formatted, status: 'ready', createdAt: Date.now() }
-            : msg,
-        ),
-      );
-    } catch (err) {
-      const fallback =
-        err instanceof Error ? err.message : 'Unable to fetch the analysis. Please try again later.';
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === placeholderId
-            ? {
-                ...msg,
-                content: fallback,
-                status: 'error',
-                createdAt: Date.now(),
-              }
-            : msg,
-        ),
-      );
-      setError(fallback);
-    } finally {
-      setIsSending(false);
-      controllerRef.current = null;
-    }
-  };
-
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!isSending) {
-      sendMessage(input);
-    }
+    if (isSending) return;
+    const trimmed = input.trim();
+    if (!trimmed) return;
+    setInput('');
+    void sendMessage(trimmed);
   };
 
   const handleQuickPrompt = (prompt: string) => {
     if (isSending) return;
-    sendMessage(prompt);
+    setInput('');
+    void sendMessage(prompt);
   };
 
   const quickPrompts = [
@@ -336,7 +160,12 @@ export function ChatPanel({ className, variant = 'page' }: ChatPanelProps) {
         )}
         <Textarea
           value={input}
-          onChange={(event) => setInput(event.target.value)}
+          onChange={(event) => {
+            setInput(event.target.value);
+            if (error) {
+              clearError();
+            }
+          }}
           placeholder="Ask about current events, actors, policies, or comparative cases..."
           rows={variant === 'dialog' ? 3 : 4}
           className="resize-none border-2 border-slate-200 focus:border-slate-900"

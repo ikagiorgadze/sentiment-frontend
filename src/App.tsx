@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster as HotToaster } from 'react-hot-toast';
 import { AuthProvider, useAuth } from '@/contexts/AuthContext';
+import { ChatProvider } from '@/contexts/ChatContext';
 import { AppLayout } from '@/layouts/AppLayout';
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import Landing from "./pages/Landing";
@@ -68,7 +69,9 @@ const App = () => (
         <HotToaster position="top-right" />
         <BrowserRouter>
           <AuthProvider>
-            <AppRoutes />
+            <ChatProvider>
+              <AppRoutes />
+            </ChatProvider>
           </AuthProvider>
         </BrowserRouter>
       </TooltipProvider>
