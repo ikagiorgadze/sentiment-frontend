@@ -10,6 +10,7 @@ import type {
   ScrapeRequest,
   ScrapeStatus,
   PageQueryOptions,
+  UsersListResult,
 } from '@/types/api';
 import type {
   GrantAccessRequest,
@@ -236,9 +237,22 @@ const apiService: ApiService = {
   },
 
   // Users
-  getUsers: async (options = {}) => {
+  getUsers: async (options: UserQueryOptions = {}): Promise<UsersListResult> => {
     const response = await apiClient.get('/users', { params: options });
-    return response.data.data;
+    const { data, count, meta } = response.data ?? {};
+    const users = Array.isArray(data) ? data : [];
+    const totalCount =
+      typeof count === 'number'
+        ? count
+        : Array.isArray(data)
+          ? data.length
+          : 0;
+
+    return {
+      users,
+      totalCount,
+      meta: meta as UsersListResult['meta'],
+    };
   },
   
   getUser: async (id, options = {}) => {

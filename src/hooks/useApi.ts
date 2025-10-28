@@ -9,6 +9,7 @@ import type {
   ScrapeRequest,
   ScrapeStatus,
   PageQueryOptions,
+  UsersListResult,
 } from '@/types/api';
 import type {
   GrantAccessRequest,
@@ -42,10 +43,11 @@ export const usePages = (options: PageQueryOptions = {}) => {
 };
 
 export const useUsers = (options: UserQueryOptions = {}) => {
-  return useQuery<UserWithDetails[]>({
+  return useQuery<UsersListResult>({
     queryKey: ['users', options],
     queryFn: () => apiService.getUsers(options),
     staleTime: 10 * 60 * 1000,
+    keepPreviousData: true,
   });
 };
 

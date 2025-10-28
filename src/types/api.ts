@@ -142,6 +142,13 @@ export interface UserQueryOptions extends QueryOptions {
   onlyWithComments?: boolean;
 }
 
+export interface PaginationMeta {
+  limit: number;
+  offset: number;
+  page: number;
+  totalPages: number;
+}
+
 export interface SentimentQueryOptions extends QueryOptions {
   post_id?: string;
   comment_id?: string;
@@ -173,7 +180,7 @@ export type CommentsResponse = SuccessResponse<CommentWithDetails[]>;
 export type CommentResponse = SuccessResponse<CommentWithDetails>;
 
 // User responses
-export type UsersResponse = SuccessResponse<UserWithDetails[]>;
+export type UsersResponse = SuccessResponse<UserWithDetails[]> & { meta?: PaginationMeta };
 export type UserResponse = SuccessResponse<UserWithDetails>;
 
 // Sentiment responses
@@ -186,6 +193,12 @@ export type UserActivityResponse = SuccessResponse<UserActivity>;
 
 // Page responses
 export type PagesResponse = SuccessResponse<PageWithStats[]>;
+
+export interface UsersListResult {
+  users: UserWithDetails[];
+  totalCount: number;
+  meta?: PaginationMeta;
+}
 
 // Scraping responses
 export type ScrapeInitiateResponse = SuccessResponse<{ request_id: string }>;
