@@ -44,7 +44,7 @@ const MarkdownMessage = ({ content }: { content: string }) => (
 );
 
 export function ChatPanel({ className, variant = 'page' }: ChatPanelProps) {
-  const { messages, isSending, error, sendMessage, clearError } = useChat();
+  const { messages, isSending, error, sendMessage, clearError, hasMore, isLoadingMore, loadMore } = useChat();
   const [input, setInput] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -69,6 +69,10 @@ export function ChatPanel({ className, variant = 'page' }: ChatPanelProps) {
     void sendMessage(prompt);
   };
 
+  const handleLoadMore = () => {
+    void loadMore();
+  };
+
   const quickPrompts = [
     'Compare election reforms in Latin America since 2018.',
     'What are the key factions in the current coalition talks in Spain?',
@@ -85,6 +89,26 @@ export function ChatPanel({ className, variant = 'page' }: ChatPanelProps) {
         )}
       >
         <div className="space-y-4">
+          {hasMore && (
+            <div className="flex justify-center">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleLoadMore}
+                disabled={isLoadingMore}
+                className="text-xs text-muted-foreground"
+              >
+                {isLoadingMore ? (
+                  <>
+                    <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+                    Loading...
+                  </>
+                ) : (
+                  'Show More'
+                )}
+              </Button>
+            </div>
+          )}
           {messages.map((message) => (
             <div
               key={message.id}

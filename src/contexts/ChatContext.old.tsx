@@ -35,6 +35,23 @@ interface ChatContextValue {
   clearHistory: () => Promise<void>;
 }
 
+interface MessageHistoryItem {
+  role: MessageRole;
+  content: string;
+}
+
+interface PendingRequestMeta {
+  id: string;
+  prompt: string;
+  history: MessageHistoryItem[];
+  createdAt: number;
+  userMessageId?: string;
+  reconstructed?: boolean;
+}
+
+const MAX_HISTORY = 40;
+const PENDING_META_SUFFIX = '::pending-meta';
+
 const makeId = () => {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
     return crypto.randomUUID();
@@ -51,23 +68,105 @@ const createWelcomeMessage = (): ChatMessage => ({
   createdAt: Date.now(),
 });
 
+const getFallbackMessages = () => [createWelcomeMessage()];
+
+const isChatMessage = (value: unknown): value is ChatMessage => {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as ChatMessage;
+  return (
+    typeof candidate.id === 'string' &&
+    (candidate.role === 'assistant' || candidate.role === 'user') &&
+    typeof candidate.content === 'string' &&
+    (candidate.status === 'ready' || candidate.status === 'pending' || candidate.status === 'error') &&
+    typeof candidate.createdAt === 'number'
+  );
+};
+
+const isHistoryItem = (value: unknown): value is MessageHistoryItem => {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as MessageHistoryItem;
+  return (
+    (candidate.role === 'assistant' || candidate.role === 'user') && typeof candidate.content === 'string'
+  );
+};
+
+const sanitizePendingMeta = (value: unknown): PendingRequestMeta | null => {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as PendingRequestMeta;
+  if (typeof candidate.id !== 'string' || typeof candidate.prompt !== 'string' || typeof candidate.createdAt !== 'number') {
+    return null;
+  }
+  if (!Array.isArray(candidate.history) || !candidate.history.every(isHistoryItem)) {
+    return null;
+  }
+  const userMessageId =
+    typeof (candidate as PendingRequestMeta).userMessageId === 'string' &&
+    (candidate as PendingRequestMeta).userMessageId.trim().length > 0
+      ? (candidate as PendingRequestMeta).userMessageId
+      : undefined;
+
+  return {
+    id: candidate.id,
+    prompt: candidate.prompt,
+    history: candidate.history.map(({ role, content }) => ({ role, content })),
+    createdAt: candidate.createdAt,
+    ...(userMessageId ? { userMessageId } : {}),
+  };
+};
+
+const loadMessages = (key: string): ChatMessage[] => {
+  if (typeof window === 'undefined') {
+    return getFallbackMessages();
+  }
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) {
+      return getFallbackMessages();
+    }
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      const sanitized = parsed.filter(isChatMessage);
+      if (sanitized.length) {
+        return sanitized;
+      }
+    }
+  } catch (error) {
+    console.warn('Unable to restore chat history', error);
+  }
+  return getFallbackMessages();
+};
+
 const ChatContext = createContext<ChatContextValue | undefined>(undefined);
 
-export function ChatProvider({ children }: { children: ReactNode }) {
+const buildHistoryWindow = (messages: ChatMessage[], upcoming?: ChatMessage): MessageHistoryItem[] => {
+  const pool = upcoming ? [...messages, upcoming] : [...messages];
+  return pool
+    .filter((msg) => msg.role !== 'assistant' || msg.status === 'ready')
+    .slice(-6)
+    .map(({ role, content }) => ({ role, content }));
+};
+
+const getPendingStorageKey = (key: string) => `${key}${PENDING_META_SUFFIX}`;
+
+export function ChatProvider({ children }: { children: ReactNode}) {
   const assistantEndpoint = useMemo(() => getAssistantEndpoint(), []);
   const { user, isAuthenticated } = useAuth();
-  const [messages, setMessages] = useState<ChatMessage[]>([createWelcomeMessage()]);
+  
+  const [messages, setMessages] = useState<ChatMessage[]>(() => [createWelcomeMessage()]);
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [offset, setOffset] = useState(0);
+  
   const controllerRef = useRef<AbortController | null>(null);
-  const loadedFromDB = useRef(false);
+  const messagesRef = useRef<ChatMessage[]>(messages);
 
-  // Load initial messages from database for authenticated users
+  // Load initial messages from database
   useEffect(() => {
-    if (!isAuthenticated || !user || loadedFromDB.current) {
+    if (!isAuthenticated) {
+      setMessages([createWelcomeMessage()]);
+      setHasMore(false);
       return;
     }
 
@@ -75,28 +174,35 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       try {
         const dbMessages = await chatService.getRecentMessages(20);
         if (dbMessages.length > 0) {
-          const converted = dbMessages.map((msg) => ({
-            id: msg.id.toString(),
+          const convertedMessages = dbMessages.map(msg => ({
+            id: String(msg.id),
             role: msg.role,
             content: msg.content,
             status: 'ready' as MessageStatus,
             createdAt: new Date(msg.created_at).getTime(),
           }));
-          setMessages(converted);
-          loadedFromDB.current = true;
+          setMessages(convertedMessages);
+          setOffset(dbMessages.length);
           
           // Check if there are more messages
           const count = await chatService.getChatMessageCount();
-          setHasMore(count > 20);
+          setHasMore(count > dbMessages.length);
+        } else {
+          setMessages([createWelcomeMessage()]);
+          setHasMore(false);
         }
       } catch (err) {
         console.error('Failed to load chat history:', err);
-        // Keep welcome message on error
+        setMessages([createWelcomeMessage()]);
       }
     };
 
-    loadInitialMessages();
-  }, [isAuthenticated, user]);
+    void loadInitialMessages();
+  }, [isAuthenticated]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   useEffect(() => {
     return () => controllerRef.current?.abort();
@@ -104,29 +210,22 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
   const clearError = useCallback(() => setError(null), []);
 
-  // Load more messages (paginated)
   const loadMore = useCallback(async () => {
-    if (!isAuthenticated || isLoadingMore || !hasMore) {
-      return;
-    }
+    if (!isAuthenticated || isLoadingMore || !hasMore) return;
 
     setIsLoadingMore(true);
     try {
-      const newOffset = offset + 6;
-      const result = await chatService.getChatHistory(6, newOffset);
-      
+      const result = await chatService.getChatHistory(6, offset);
       if (result.messages.length > 0) {
-        const converted = result.messages.map((msg) => ({
-          id: msg.id.toString(),
+        const convertedMessages = result.messages.reverse().map(msg => ({
+          id: String(msg.id),
           role: msg.role,
           content: msg.content,
           status: 'ready' as MessageStatus,
           createdAt: new Date(msg.created_at).getTime(),
         }));
-        
-        // Prepend older messages (they come in desc order, so reverse)
-        setMessages((prev) => [...converted.reverse(), ...prev]);
-        setOffset(newOffset);
+        setMessages(prev => [...convertedMessages, ...prev]);
+        setOffset(prev => prev + result.messages.length);
         setHasMore(result.hasMore);
       } else {
         setHasMore(false);
@@ -139,21 +238,17 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     }
   }, [isAuthenticated, isLoadingMore, hasMore, offset]);
 
-  // Clear all chat history
   const clearHistory = useCallback(async () => {
-    if (isAuthenticated) {
-      try {
-        await chatService.clearChatHistory();
-        setMessages([createWelcomeMessage()]);
-        setOffset(0);
-        setHasMore(false);
-        loadedFromDB.current = false;
-      } catch (err) {
-        console.error('Failed to clear history:', err);
-        setError('Failed to clear history');
-      }
-    } else {
+    if (!isAuthenticated) return;
+
+    try {
+      await chatService.clearChatHistory();
       setMessages([createWelcomeMessage()]);
+      setOffset(0);
+      setHasMore(false);
+    } catch (err) {
+      console.error('Failed to clear history:', err);
+      setError('Failed to clear history');
     }
   }, [isAuthenticated]);
 
@@ -165,7 +260,6 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }
 
       setError(null);
-      setIsSending(true);
 
       const userMessage: ChatMessage = {
         id: makeId(),
@@ -183,26 +277,27 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         createdAt: Date.now(),
       };
 
-      // Add messages to UI immediately
       setMessages((prev) => [...prev, userMessage, assistantPlaceholder]);
-
-      // Build history from last 6 messages for n8n
-      const historyForN8N = messages
-        .filter((m) => m.status === 'ready')
-        .slice(-6)
-        .map(({ role, content }) => ({ role, content }));
+      setIsSending(true);
 
       const controller = new AbortController();
       controllerRef.current = controller;
 
       try {
-        // Call n8n workflow
+        // Build history window (last 10 messages for better context)
+        const historyWindow = messagesRef.current
+          .filter((msg) => msg.status === 'ready')
+          .slice(-10)
+          .map(({ role, content }) => ({ role, content }));
+
         const response = await fetch(assistantEndpoint, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+          },
           body: JSON.stringify({
             chatInput: trimmed,
-            history: historyForN8N,
+            history: historyWindow,
             auth_user_id: user?.id,
           }),
           signal: controller.signal,
@@ -215,7 +310,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         }
 
         const formatted = rawText.trim() || 'No analysis was returned for that prompt.';
-
+        
         // Update assistant message
         setMessages((prev) =>
           prev.map((msg) =>
@@ -225,16 +320,16 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           )
         );
 
-        // Save to database for authenticated users
+        // Save both messages to database if authenticated
         if (isAuthenticated) {
           try {
             await chatService.saveChatMessages([
               { role: 'user', content: trimmed },
               { role: 'assistant', content: formatted },
             ]);
-          } catch (dbErr) {
-            console.error('Failed to save messages to database:', dbErr);
-            // Don't show error to user, messages are already visible
+          } catch (dbError) {
+            console.error('Failed to save messages to database:', dbError);
+            // Don't show error to user, messages are still in memory
           }
         }
       } catch (err) {
@@ -258,7 +353,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         controllerRef.current = null;
       }
     },
-    [assistantEndpoint, isSending, messages, user?.id, isAuthenticated],
+    [assistantEndpoint, isSending, isAuthenticated, user?.id],
   );
 
   const value = useMemo(
