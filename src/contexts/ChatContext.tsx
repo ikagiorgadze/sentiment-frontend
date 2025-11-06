@@ -12,37 +12,64 @@ import { getAssistantEndpoint } from '@/lib/assistantConfig';
 import { useAuth } from '@/contexts/AuthContext';
 import * as chatService from '@/services/chatService';
 
-type MessageRole = 'assistant' | 'user';
+type MessageRole = chatService.MessageRole;
 type MessageStatus = 'ready' | 'pending' | 'error';
 
-export interface ChatMessage {
+export interface ConversationMessage {
   id: string;
   role: MessageRole;
   content: string;
   status: MessageStatus;
   createdAt: number;
+  sourceMessageId?: number;
+}
+
+interface PaginationState {
+  nextOffset: number;
+  total: number;
+  hasMore: boolean;
 }
 
 interface ChatContextValue {
-  messages: ChatMessage[];
-  isSending: boolean;
-  error: string | null;
-  sendMessage: (prompt: string) => Promise<void>;
-  clearError: () => void;
+  workspace: chatService.WorkspaceOverview | null;
+  workspaceError: string | null;
+  isWorkspaceLoading: boolean;
+  activeChatId: string | null;
+  activeChat: chatService.ChatSummary | null;
+  isActiveChatLoading: boolean;
+  messages: ConversationMessage[];
   hasMore: boolean;
   isLoadingMore: boolean;
+  isSending: boolean;
+  error: string | null;
+  refreshWorkspace: (preferredChatId?: string | null) => Promise<void>;
+  startNewChat: (options?: { projectId?: string | null; title?: string | null }) => Promise<chatService.ChatSummary | null>;
+  selectChat: (chatId: string) => Promise<void>;
+  sendMessage: (prompt: string) => Promise<void>;
   loadMore: () => Promise<void>;
-  clearHistory: () => Promise<void>;
+  clearChat: () => Promise<void>;
+  deleteChat: (chatId: string) => Promise<void>;
+  renameChat: (chatId: string, title: string) => Promise<void>;
+  moveChatToProject: (chatId: string, projectId: string | null) => Promise<void>;
+  createProject: (payload: { name: string; description?: string | null }) => Promise<chatService.ChatProject | null>;
+  updateProject: (projectId: string, payload: { name?: string | null; description?: string | null }) => Promise<chatService.ChatProject | null>;
+  deleteProject: (projectId: string) => Promise<void>;
+  clearWorkspaceHistory: () => Promise<void>;
+  clearError: () => void;
 }
+
+const PAGE_SIZE = 20;
+
+const ChatContext = createContext<ChatContextValue | undefined>(undefined);
 
 const makeId = () => {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
     return crypto.randomUUID();
   }
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 };
 
-const createWelcomeMessage = (): ChatMessage => ({
+const createWelcomeMessage = (): ConversationMessage => ({
   id: makeId(),
   role: 'assistant',
   content:
@@ -51,111 +78,469 @@ const createWelcomeMessage = (): ChatMessage => ({
   createdAt: Date.now(),
 });
 
-const ChatContext = createContext<ChatContextValue | undefined>(undefined);
+const chatExists = (workspace: chatService.WorkspaceOverview | null, chatId: string | null): boolean => {
+  if (!workspace || !chatId) {
+    return false;
+  }
+  return (
+    workspace.standalone.some((chat) => chat.id === chatId) ||
+    workspace.projects.some((group) => group.chats.some((chat) => chat.id === chatId))
+  );
+};
+
+const firstAvailableChatId = (workspace: chatService.WorkspaceOverview | null): string | null => {
+  if (!workspace) {
+    return null;
+  }
+  if (workspace.standalone.length > 0) {
+    return workspace.standalone[0].id;
+  }
+  for (const project of workspace.projects) {
+    if (project.chats.length > 0) {
+      return project.chats[0].id;
+    }
+  }
+  return null;
+};
+
+const normalizeMessages = (messages: chatService.ChatMessage[]): ConversationMessage[] =>
+  messages
+    .map<ConversationMessage>((message) => ({
+      id: message.id.toString(),
+      role: message.role,
+      content: message.content,
+      status: 'ready',
+      createdAt: new Date(message.created_at).getTime(),
+      sourceMessageId: message.id,
+    }))
+    .reverse();
+
+const deriveTitleFromContent = (content: string): string => {
+  const firstLine = content.split('\n').find((line) => line.trim().length > 0) ?? content;
+  const trimmed = firstLine.trim();
+  if (!trimmed) {
+    return 'New chat';
+  }
+  return trimmed.length > 80 ? `${trimmed.slice(0, 77)}...` : trimmed;
+};
+
+const dedupeMessages = (messages: ConversationMessage[]): ConversationMessage[] => {
+  const seen = new Set<string>();
+  const result: ConversationMessage[] = [];
+  for (const message of messages) {
+    const key = message.sourceMessageId ? `${message.sourceMessageId}` : message.id;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(message);
+    }
+  }
+  return result;
+};
 
 export function ChatProvider({ children }: { children: ReactNode }) {
   const assistantEndpoint = useMemo(() => getAssistantEndpoint(), []);
   const { user, isAuthenticated } = useAuth();
-  const [messages, setMessages] = useState<ChatMessage[]>([createWelcomeMessage()]);
+  const [workspace, setWorkspace] = useState<chatService.WorkspaceOverview | null>(null);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [isWorkspaceLoading, setIsWorkspaceLoading] = useState(false);
+
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  const activeChatIdRef = useRef<string | null>(null);
+
+  const [messageStore, setMessageStore] = useState<Record<string, ConversationMessage[]>>({});
+  const [paginationStore, setPaginationStore] = useState<Record<string, PaginationState>>({});
+  const [isActiveChatLoading, setIsActiveChatLoading] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [hasMore, setHasMore] = useState(false);
-  const [isLoadingMore, setIsLoadingMore] = useState(false);
-  const [offset, setOffset] = useState(0);
+
   const controllerRef = useRef<AbortController | null>(null);
-  const loadedFromDB = useRef(false);
 
-  // Load initial messages from database for authenticated users
   useEffect(() => {
-    if (!isAuthenticated || !user || loadedFromDB.current) {
-      return;
-    }
-
-    const loadInitialMessages = async () => {
-      try {
-        const dbMessages = await chatService.getRecentMessages(20);
-        if (dbMessages.length > 0) {
-          const converted = dbMessages.map((msg) => ({
-            id: msg.id.toString(),
-            role: msg.role,
-            content: msg.content,
-            status: 'ready' as MessageStatus,
-            createdAt: new Date(msg.created_at).getTime(),
-          }));
-          setMessages(converted);
-          loadedFromDB.current = true;
-          
-          // Check if there are more messages
-          const count = await chatService.getChatMessageCount();
-          setHasMore(count > 20);
-        }
-      } catch (err) {
-        console.error('Failed to load chat history:', err);
-        // Keep welcome message on error
-      }
-    };
-
-    loadInitialMessages();
-  }, [isAuthenticated, user]);
+    activeChatIdRef.current = activeChatId;
+  }, [activeChatId]);
 
   useEffect(() => {
     return () => controllerRef.current?.abort();
   }, []);
 
+  const refreshWorkspace = useCallback(
+    async (preferredChatId?: string | null) => {
+      if (!isAuthenticated) {
+        setWorkspace(null);
+        setActiveChatId(null);
+        setMessageStore({});
+        setPaginationStore({});
+        return;
+      }
+
+      setIsWorkspaceLoading(true);
+      try {
+        const data = await chatService.fetchWorkspaceOverview();
+        setWorkspace(data);
+        setWorkspaceError(null);
+
+        const fallback = firstAvailableChatId(data);
+
+        const desiredChat =
+          (preferredChatId && chatExists(data, preferredChatId) && preferredChatId) ||
+          (activeChatId && chatExists(data, activeChatId) && activeChatId) ||
+          fallback;
+
+        setActiveChatId(desiredChat ?? null);
+      } catch (err) {
+        console.error('Failed to load chat workspace:', err);
+        setWorkspaceError('Failed to load workspace');
+      } finally {
+        setIsWorkspaceLoading(false);
+      }
+    },
+    [activeChatId, isAuthenticated],
+  );
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setWorkspace(null);
+      setWorkspaceError(null);
+      setActiveChatId(null);
+      setMessageStore({});
+      setPaginationStore({});
+      return;
+    }
+
+    void refreshWorkspace();
+  }, [isAuthenticated, refreshWorkspace]);
+
+  useEffect(() => {
+    const chatId = activeChatId;
+    if (!chatId || !isAuthenticated) {
+      setIsActiveChatLoading(false);
+      return;
+    }
+
+    if (messageStore[chatId]) {
+      setIsActiveChatLoading(false);
+      return;
+    }
+
+    const loadMessages = async () => {
+      setIsActiveChatLoading(true);
+      try {
+        const history = await chatService.getChatHistory(chatId, PAGE_SIZE, 0);
+        const normalized = normalizeMessages(history.messages);
+
+        setMessageStore((prev) => ({
+          ...prev,
+          [chatId]: normalized,
+        }));
+
+        setPaginationStore((prev) => ({
+          ...prev,
+          [chatId]: {
+            nextOffset: history.messages.length,
+            total: history.total,
+            hasMore: history.hasMore,
+          },
+        }));
+      } catch (err) {
+        console.error('Failed to load chat messages:', err);
+        setError('Failed to load chat messages');
+      } finally {
+        setIsActiveChatLoading(false);
+      }
+    };
+
+    if (!messageStore[chatId]) {
+      void loadMessages();
+    }
+  }, [activeChatId, isAuthenticated, messageStore]);
+
+  const activeChat = useMemo(() => {
+    if (!workspace || !activeChatId) {
+      return null;
+    }
+
+    const standalone = workspace.standalone.find((chat) => chat.id === activeChatId);
+    if (standalone) {
+      return standalone;
+    }
+
+    for (const group of workspace.projects) {
+      const match = group.chats.find((chat) => chat.id === activeChatId);
+      if (match) {
+        return match;
+      }
+    }
+
+    return null;
+  }, [workspace, activeChatId]);
+
+  const messages = useMemo(() => {
+    if (!activeChatId) {
+      return [createWelcomeMessage()];
+    }
+
+    const chatMessages = messageStore[activeChatId];
+    if (!chatMessages || chatMessages.length === 0) {
+      return [createWelcomeMessage()];
+    }
+
+    return chatMessages;
+  }, [activeChatId, messageStore]);
+
+  const activePagination = activeChatId ? paginationStore[activeChatId] : undefined;
+  const hasMore = activePagination?.hasMore ?? false;
+
   const clearError = useCallback(() => setError(null), []);
 
-  // Load more messages (paginated)
+  const startNewChat = useCallback(
+    async (options?: { projectId?: string | null; title?: string | null }) => {
+      if (!isAuthenticated) {
+        return null;
+      }
+
+      try {
+        const chat = await chatService.createChatSession({
+          projectId: options?.projectId ?? null,
+          title: options?.title ?? null,
+        });
+
+        setMessageStore((prev) => ({
+          ...prev,
+          [chat.id]: [],
+        }));
+        setPaginationStore((prev) => ({
+          ...prev,
+          [chat.id]: {
+            nextOffset: 0,
+            total: 0,
+            hasMore: false,
+          },
+        }));
+
+        setActiveChatId(chat.id);
+        activeChatIdRef.current = chat.id;
+
+        await refreshWorkspace(chat.id);
+        return chat;
+      } catch (err) {
+        console.error('Failed to start new chat:', err);
+        setError('Failed to start a new chat');
+        return null;
+      }
+    },
+    [isAuthenticated, refreshWorkspace],
+  );
+
+  const selectChat = useCallback(async (chatId: string) => {
+    if (activeChatIdRef.current === chatId) {
+      return;
+    }
+    setActiveChatId(chatId);
+    activeChatIdRef.current = chatId;
+    if (!messageStore[chatId]) {
+      setIsActiveChatLoading(true);
+      try {
+        const history = await chatService.getChatHistory(chatId, PAGE_SIZE, 0);
+        const normalized = normalizeMessages(history.messages);
+        setMessageStore((prev) => ({
+          ...prev,
+          [chatId]: normalized,
+        }));
+        setPaginationStore((prev) => ({
+          ...prev,
+          [chatId]: {
+            nextOffset: history.messages.length,
+            total: history.total,
+            hasMore: history.hasMore,
+          },
+        }));
+      } catch (err) {
+        console.error('Failed to load chat messages:', err);
+        setError('Failed to load chat messages');
+      } finally {
+        setIsActiveChatLoading(false);
+      }
+    }
+  }, [messageStore]);
+
   const loadMore = useCallback(async () => {
-    if (!isAuthenticated || isLoadingMore || !hasMore) {
+    const chatId = activeChatIdRef.current;
+    if (!chatId || isLoadingMore) {
+      return;
+    }
+
+    const pagination = paginationStore[chatId];
+    if (!pagination?.hasMore) {
       return;
     }
 
     setIsLoadingMore(true);
     try {
-      const newOffset = offset + 6;
-      const result = await chatService.getChatHistory(6, newOffset);
-      
-      if (result.messages.length > 0) {
-        const converted = result.messages.map((msg) => ({
-          id: msg.id.toString(),
-          role: msg.role,
-          content: msg.content,
-          status: 'ready' as MessageStatus,
-          createdAt: new Date(msg.created_at).getTime(),
-        }));
-        
-        // Prepend older messages (they come in desc order, so reverse)
-        setMessages((prev) => [...converted.reverse(), ...prev]);
-        setOffset(newOffset);
-        setHasMore(result.hasMore);
-      } else {
-        setHasMore(false);
-      }
+      const offset = pagination.nextOffset ?? (messageStore[chatId]?.length ?? 0);
+      const history = await chatService.getChatHistory(chatId, PAGE_SIZE, offset);
+      const normalized = normalizeMessages(history.messages);
+
+      setMessageStore((prev) => {
+        const existing = prev[chatId] ?? [];
+        return {
+          ...prev,
+          [chatId]: dedupeMessages([...normalized, ...existing]),
+        };
+      });
+
+      setPaginationStore((prev) => ({
+        ...prev,
+        [chatId]: {
+          nextOffset: offset + history.messages.length,
+          total: history.total,
+          hasMore: history.hasMore,
+        },
+      }));
     } catch (err) {
-      console.error('Failed to load more messages:', err);
-      setError('Failed to load more messages');
+      console.error('Failed to load older messages:', err);
+      setError('Failed to load older messages');
     } finally {
       setIsLoadingMore(false);
     }
-  }, [isAuthenticated, isLoadingMore, hasMore, offset]);
+  }, [isLoadingMore, messageStore, paginationStore]);
 
-  // Clear all chat history
-  const clearHistory = useCallback(async () => {
-    if (isAuthenticated) {
-      try {
-        await chatService.clearChatHistory();
-        setMessages([createWelcomeMessage()]);
-        setOffset(0);
-        setHasMore(false);
-        loadedFromDB.current = false;
-      } catch (err) {
-        console.error('Failed to clear history:', err);
-        setError('Failed to clear history');
-      }
-    } else {
-      setMessages([createWelcomeMessage()]);
+  const clearChat = useCallback(async () => {
+    const chatId = activeChatIdRef.current;
+    if (!chatId) {
+      return;
     }
-  }, [isAuthenticated]);
+
+    try {
+      await chatService.clearChat(chatId);
+      setMessageStore((prev) => ({
+        ...prev,
+        [chatId]: [],
+      }));
+      setPaginationStore((prev) => ({
+        ...prev,
+        [chatId]: {
+          nextOffset: 0,
+          total: 0,
+          hasMore: false,
+        },
+      }));
+      await refreshWorkspace(chatId);
+    } catch (err) {
+      console.error('Failed to clear chat history:', err);
+      setError('Failed to clear chat history');
+    }
+  }, [refreshWorkspace]);
+
+  const deleteChat = useCallback(
+    async (chatId: string) => {
+      try {
+        await chatService.deleteChatSession(chatId);
+        setMessageStore((prev) => {
+          const { [chatId]: _, ...rest } = prev;
+          return rest;
+        });
+        setPaginationStore((prev) => {
+          const { [chatId]: _, ...rest } = prev;
+          return rest;
+        });
+
+        if (activeChatIdRef.current === chatId) {
+          activeChatIdRef.current = null;
+          setActiveChatId(null);
+        }
+
+        await refreshWorkspace();
+      } catch (err) {
+        console.error('Failed to delete chat session:', err);
+        setError('Failed to delete chat');
+      }
+    },
+    [refreshWorkspace],
+  );
+
+  const renameChat = useCallback(
+    async (chatId: string, title: string) => {
+      try {
+        await chatService.updateChatSession(chatId, { title: title.trim() });
+        await refreshWorkspace(chatId);
+      } catch (err) {
+        console.error('Failed to rename chat:', err);
+        setError('Failed to rename chat');
+      }
+    },
+    [refreshWorkspace],
+  );
+
+  const moveChatToProject = useCallback(
+    async (chatId: string, projectId: string | null) => {
+      try {
+        await chatService.updateChatSession(chatId, { projectId });
+        await refreshWorkspace(chatId);
+      } catch (err) {
+        console.error('Failed to move chat:', err);
+        setError('Failed to move chat');
+      }
+    },
+    [refreshWorkspace],
+  );
+
+  const createProject = useCallback(
+    async (payload: { name: string; description?: string | null }) => {
+      try {
+        const project = await chatService.createProject(payload);
+        await refreshWorkspace(activeChatIdRef.current);
+        return project;
+      } catch (err) {
+        console.error('Failed to create project:', err);
+        setError('Failed to create project');
+        return null;
+      }
+    },
+    [refreshWorkspace],
+  );
+
+  const updateProject = useCallback(
+    async (projectId: string, payload: { name?: string | null; description?: string | null }) => {
+      try {
+        const project = await chatService.updateProject(projectId, payload);
+        await refreshWorkspace(activeChatIdRef.current);
+        return project;
+      } catch (err) {
+        console.error('Failed to update project:', err);
+        setError('Failed to update project');
+        return null;
+      }
+    },
+    [refreshWorkspace],
+  );
+
+  const deleteProject = useCallback(
+    async (projectId: string) => {
+      try {
+        await chatService.deleteProject(projectId);
+        await refreshWorkspace(activeChatIdRef.current);
+      } catch (err) {
+        console.error('Failed to delete project:', err);
+        setError('Failed to delete project');
+      }
+    },
+    [refreshWorkspace],
+  );
+
+  const clearWorkspaceHistory = useCallback(async () => {
+    try {
+      await chatService.clearWorkspace();
+      setMessageStore({});
+      setPaginationStore({});
+      setActiveChatId(null);
+      activeChatIdRef.current = null;
+      await refreshWorkspace();
+    } catch (err) {
+      console.error('Failed to clear workspace history:', err);
+      setError('Failed to clear workspace');
+    }
+  }, [refreshWorkspace]);
 
   const sendMessage = useCallback(
     async (prompt: string) => {
@@ -164,10 +549,25 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      setError(null);
-      setIsSending(true);
+      if (!isAuthenticated) {
+        setError('You must be signed in to chat.');
+        return;
+      }
 
-      const userMessage: ChatMessage = {
+      setError(null);
+
+      let chatId = activeChatIdRef.current;
+      if (!chatId) {
+        const chat = await startNewChat();
+        chatId = chat?.id ?? null;
+      }
+
+      if (!chatId) {
+        setError('Unable to start a new chat session.');
+        return;
+      }
+
+      const userMessage: ConversationMessage = {
         id: makeId(),
         role: 'user',
         content: trimmed,
@@ -175,7 +575,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         createdAt: Date.now(),
       };
 
-      const assistantPlaceholder: ChatMessage = {
+      const assistantPlaceholder: ConversationMessage = {
         id: makeId(),
         role: 'assistant',
         content: 'Analyzing your question...',
@@ -183,12 +583,18 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         createdAt: Date.now(),
       };
 
-      // Add messages to UI immediately
-      setMessages((prev) => [...prev, userMessage, assistantPlaceholder]);
+      setMessageStore((prev) => {
+        const existing = prev[chatId!] ?? [];
+        return {
+          ...prev,
+          [chatId!]: [...existing, userMessage, assistantPlaceholder],
+        };
+      });
 
-      // Build history from last 6 messages for n8n
-      const historyForN8N = messages
-        .filter((m) => m.status === 'ready')
+      setIsSending(true);
+
+      const historyForN8N = (messageStore[chatId] ?? [])
+        .filter((message) => message.status === 'ready')
         .slice(-6)
         .map(({ role, content }) => ({ role, content }));
 
@@ -196,7 +602,6 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       controllerRef.current = controller;
 
       try {
-        // Call n8n workflow
         const response = await fetch(assistantEndpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -216,26 +621,80 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
         const formatted = rawText.trim() || 'No analysis was returned for that prompt.';
 
-        // Update assistant message
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === assistantPlaceholder.id
-              ? { ...msg, content: formatted, status: 'ready' as MessageStatus }
-              : msg
-          )
-        );
+        setMessageStore((prev) => {
+          const existing = prev[chatId!] ?? [];
+          return {
+            ...prev,
+            [chatId!]: existing.map((message) =>
+              message.id === assistantPlaceholder.id
+                ? { ...message, content: formatted, status: 'ready' as MessageStatus, createdAt: Date.now() }
+                : message,
+            ),
+          };
+        });
 
-        // Save to database for authenticated users
-        if (isAuthenticated) {
-          try {
-            await chatService.saveChatMessages([
-              { role: 'user', content: trimmed },
-              { role: 'assistant', content: formatted },
-            ]);
-          } catch (dbErr) {
-            console.error('Failed to save messages to database:', dbErr);
-            // Don't show error to user, messages are already visible
+        try {
+          const savedMessages = await chatService.saveChatMessages(chatId, [
+            { role: 'user', content: trimmed },
+            { role: 'assistant', content: formatted },
+          ]);
+
+          const userSaved = savedMessages.find((message) => message.role === 'user');
+          const assistantSaved = savedMessages.find((message) => message.role === 'assistant');
+
+          setMessageStore((prev) => {
+            const existing = prev[chatId!] ?? [];
+            return {
+              ...prev,
+              [chatId!]: dedupeMessages(
+                existing.map((message) => {
+                  if (userSaved && message.id === userMessage.id) {
+                    return {
+                      ...message,
+                      id: userSaved.id.toString(),
+                      sourceMessageId: userSaved.id,
+                      createdAt: new Date(userSaved.created_at).getTime(),
+                    };
+                  }
+                  if (assistantSaved && message.id === assistantPlaceholder.id) {
+                    return {
+                      ...message,
+                      id: assistantSaved.id.toString(),
+                      sourceMessageId: assistantSaved.id,
+                      createdAt: new Date(assistantSaved.created_at).getTime(),
+                    };
+                  }
+                  return message;
+                }),
+              ),
+            };
+          });
+
+          setPaginationStore((prev) => {
+            const existing = prev[chatId!] ?? { nextOffset: 0, total: 0, hasMore: false };
+            return {
+              ...prev,
+              [chatId!]: {
+                nextOffset: existing.nextOffset,
+                total: existing.total + savedMessages.length,
+                hasMore: existing.hasMore,
+              },
+            };
+          });
+
+          const shouldRename =
+            !activeChat?.title ||
+            activeChat.title.trim().length === 0 ||
+            activeChat.title.toLowerCase() === 'new chat';
+
+          if (shouldRename) {
+            await chatService.updateChatSession(chatId, { title: deriveTitleFromContent(trimmed) });
+            await refreshWorkspace(chatId);
+          } else {
+            await refreshWorkspace(chatId);
           }
+        } catch (dbErr) {
+          console.error('Failed to save chat messages:', dbErr);
         }
       } catch (err) {
         const fallback =
@@ -245,35 +704,90 @@ export function ChatProvider({ children }: { children: ReactNode }) {
               ? err.message
               : 'Unable to fetch the analysis. Please try again later.';
 
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === assistantPlaceholder.id
-              ? { ...msg, content: fallback, status: 'error' as MessageStatus }
-              : msg
-          )
-        );
+        setMessageStore((prev) => {
+          const existing = prev[chatId!] ?? [];
+          return {
+            ...prev,
+            [chatId!]: existing.map((message) =>
+              message.id === assistantPlaceholder.id
+                ? { ...message, content: fallback, status: 'error' as MessageStatus }
+                : message,
+            ),
+          };
+        });
         setError(fallback);
       } finally {
         setIsSending(false);
         controllerRef.current = null;
       }
     },
-    [assistantEndpoint, isSending, messages, user?.id, isAuthenticated],
+    [
+      activeChat?.title,
+      assistantEndpoint,
+      isAuthenticated,
+      isSending,
+      messageStore,
+      refreshWorkspace,
+      startNewChat,
+      user?.id,
+    ],
   );
 
-  const value = useMemo(
+  const value = useMemo<ChatContextValue>(
     () => ({
+      workspace,
+      workspaceError,
+      isWorkspaceLoading,
+      activeChatId,
+      activeChat,
+      isActiveChatLoading,
       messages,
-      isSending,
-      error,
-      sendMessage,
-      clearError,
       hasMore,
       isLoadingMore,
+      isSending,
+      error,
+      refreshWorkspace,
+      startNewChat,
+      selectChat,
+      sendMessage,
       loadMore,
-      clearHistory,
+      clearChat,
+      deleteChat,
+      renameChat,
+      moveChatToProject,
+      createProject,
+      updateProject,
+      deleteProject,
+      clearWorkspaceHistory,
+      clearError,
     }),
-    [messages, isSending, error, sendMessage, clearError, hasMore, isLoadingMore, loadMore, clearHistory],
+    [
+      workspace,
+      workspaceError,
+      isWorkspaceLoading,
+      activeChatId,
+      activeChat,
+      isActiveChatLoading,
+      messages,
+      hasMore,
+      isLoadingMore,
+      isSending,
+      error,
+      refreshWorkspace,
+      startNewChat,
+      selectChat,
+      sendMessage,
+      loadMore,
+      clearChat,
+      deleteChat,
+      renameChat,
+      moveChatToProject,
+      createProject,
+      updateProject,
+      deleteProject,
+      clearWorkspaceHistory,
+      clearError,
+    ],
   );
 
   return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>;
